@@ -1,0 +1,22 @@
+# Windows
+Thumbs.db
+Desktop.ini
+
+# PowerShell
+*.ps1xml
+*.pssc
+*.psrc
+
+# Logs and local output
+*.log
+*.tmp
+*.bak
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Alternate local git metadata used by this workspace
+.gitdata/
