@@ -14,7 +14,7 @@ function Get-LocalAppDataPath {
 }
 
 function Get-KnownSavePath {
-    return (Join-Path (Get-LocalAppDataPath) "R5\Saved")
+    return (Join-Path (Get-LocalAppDataPath) "R5\Saved\SaveProfiles")
 }
 
 function Convert-EscapedText {
@@ -140,7 +140,7 @@ function Find-WindroseSavePath {
                     $match = [regex]::Match($text, '"([^"/\\]+)[/\\]Saved[/\\]')
                     if ($match.Success) {
                         $project = $match.Groups[1].Value
-                        return (Join-Path (Get-LocalAppDataPath) "$project\Saved")
+                        return (Join-Path (Get-LocalAppDataPath) "$project\Saved\SaveProfiles")
                     }
                 }
                 catch { }
@@ -155,8 +155,9 @@ function Get-WindroseTargetPath {
     param([string]$BasePath)
     if ([string]::IsNullOrWhiteSpace($BasePath)) { return "" }
     $leaf = Split-Path -Leaf $BasePath
-    if ($leaf -eq "Windrose Saves") { return $BasePath }
-    return (Join-Path $BasePath "Windrose Saves")
+    if ($leaf -eq "SaveProfiles") { return $BasePath }
+    if ($leaf -eq "Windrose Saves") { return (Join-Path $BasePath "SaveProfiles") }
+    return (Join-Path $BasePath "Windrose Saves\SaveProfiles")
 }
 
 function Test-ProcessRunning {
@@ -185,6 +186,43 @@ function Get-RedirectState {
         return "redirected"
     }
     return "normal"
+}
+
+function Get-JunctionTarget {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+
+    $parent = Split-Path -Parent $Path
+    $name = Split-Path -Leaf $Path
+    $lines = cmd.exe /c dir /AL "$parent" 2>$null
+    foreach ($line in $lines) {
+        if ($line -match '<JUNCTION>\s+' + [regex]::Escape($name) + '\s+\[(.+)\]') {
+            $target = $matches[1]
+            if ($target.StartsWith('\??\')) { $target = $target.Substring(4) }
+            return $target
+        }
+    }
+
+    return $null
+}
+
+function Remove-Junction {
+    param([string]$Path)
+    $null = cmd.exe /c rmdir "$Path"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to remove junction: $Path"
+    }
+}
+
+function New-Junction {
+    param(
+        [string]$Path,
+        [string]$Target
+    )
+    $null = cmd.exe /c mklink /J "$Path" "$Target"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create junction: $Path -> $Target"
+    }
 }
 
 function Ensure-AdminOrAsk {
@@ -216,6 +254,11 @@ function Invoke-Redirect {
         throw "Save folder was not found: $SavePath"
     }
 
+    $savedRoot = Split-Path -Parent $SavePath
+    if ((Get-RedirectState -SavePath $savedRoot) -eq "redirected") {
+        throw "The whole Saved folder is currently redirected. Restore it first, then move only SaveProfiles."
+    }
+
     $state = Get-RedirectState -SavePath $SavePath
     if ($state -eq "redirected") {
         throw "Save folder already looks redirected."
@@ -233,21 +276,29 @@ function Invoke-Redirect {
         New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
     }
 
-    $backupRoot = Join-Path $targetParent ("WindroseBackup-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $backupBase = Split-Path -Parent $savedRoot
+    $backupRoot = Join-Path $backupBase ("Windrose Saves Backup-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+    $backupPath = Join-Path $backupRoot "SaveProfiles"
     Write-Log "Creating backup: $backupRoot"
-    Copy-Item -LiteralPath $SavePath -Destination $backupRoot -Recurse -Force
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    Copy-Item -LiteralPath $SavePath -Destination $backupPath -Recurse -Force
 
     Write-Log "Moving saves: $TargetPath"
     Move-Item -LiteralPath $SavePath -Destination $TargetPath
 
     try {
         Write-Log "Creating junction at the old save path."
-        New-Item -ItemType Junction -Path $SavePath -Target $TargetPath | Out-Null
+        New-Junction -Path $SavePath -Target $TargetPath
     }
     catch {
         Write-Log "Failed to create junction. Moving saves back."
         if (Test-Path -LiteralPath $SavePath) {
-            Remove-Item -LiteralPath $SavePath -Force
+            if ((Get-RedirectState -SavePath $SavePath) -eq "redirected") {
+                Remove-Junction -Path $SavePath
+            }
+            else {
+                Remove-Item -LiteralPath $SavePath -Force -Recurse
+            }
         }
         Move-Item -LiteralPath $TargetPath -Destination $SavePath
         throw
@@ -269,19 +320,41 @@ function Invoke-Restore {
         throw "Windrose is running. Close the game before restoring."
     }
 
-    if ((Get-RedirectState -SavePath $SavePath) -ne "redirected") {
-        throw "Old path does not look like a junction: $SavePath"
+    $savedRoot = Split-Path -Parent $SavePath
+
+    if ((Get-RedirectState -SavePath $SavePath) -eq "redirected") {
+        $actualTarget = Get-JunctionTarget -Path $SavePath
+        if (-not $actualTarget) { $actualTarget = $TargetPath }
+        if (-not (Test-Path -LiteralPath $actualTarget)) {
+            throw "Target folder was not found: $actualTarget"
+        }
+
+        Write-Log "Removing junction: $SavePath"
+        Remove-Junction -Path $SavePath
+
+        Write-Log "Moving SaveProfiles back to the old path."
+        Move-Item -LiteralPath $actualTarget -Destination $SavePath
+        return
     }
 
-    if (-not (Test-Path -LiteralPath $TargetPath)) {
-        throw "Target folder was not found: $TargetPath"
+    if ((Get-RedirectState -SavePath $savedRoot) -eq "redirected") {
+        $legacyTarget = Get-JunctionTarget -Path $savedRoot
+        if (-not $legacyTarget) {
+            throw "The whole Saved folder is redirected, but the junction target could not be detected."
+        }
+        if (-not (Test-Path -LiteralPath $legacyTarget)) {
+            throw "Target folder was not found: $legacyTarget"
+        }
+
+        Write-Log "Removing legacy Saved junction: $savedRoot"
+        Remove-Junction -Path $savedRoot
+
+        Write-Log "Moving full Saved folder back to the old path."
+        Move-Item -LiteralPath $legacyTarget -Destination $savedRoot
+        return
     }
 
-    Write-Log "Removing junction: $SavePath"
-    Remove-Item -LiteralPath $SavePath -Force
-
-    Write-Log "Moving saves back to the old path."
-    Move-Item -LiteralPath $TargetPath -Destination $SavePath
+    throw "Old path does not look like a junction: $SavePath"
 }
 
 $script:MainForm = New-Object System.Windows.Forms.Form
@@ -336,6 +409,7 @@ $script:Strings = @{
         CheckLinked = "Check: old path already goes through a link."
         CheckNormal = "Check: saves are still a normal folder."
         CheckMissing = "Check: save folder was not found."
+        LegacyRedirect = "The whole Saved folder is redirected. Restore first, then move only SaveProfiles."
         ConfirmMove = "A backup will be created, then the save folder will be moved:`n`n{0}`n->`n{1}`n`nContinue?"
         ConfirmMoveTitle = "Confirm move"
         ConfirmRestore = "Move saves back to the old path and remove the junction?"
@@ -377,6 +451,7 @@ $script:Strings = @{
         CheckLinked = "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430: \u0441\u0442\u0430\u0440\u044b\u0439 \u043f\u0443\u0442\u044c \u0443\u0436\u0435 \u0432\u0435\u0434\u0435\u0442 \u0447\u0435\u0440\u0435\u0437 \u0441\u0441\u044b\u043b\u043a\u0443."
         CheckNormal = "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430: \u0441\u0435\u0439\u0432\u044b \u043f\u043e\u043a\u0430 \u043b\u0435\u0436\u0430\u0442 \u043e\u0431\u044b\u0447\u043d\u043e\u0439 \u043f\u0430\u043f\u043a\u043e\u0439."
         CheckMissing = "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430: \u043f\u0430\u043f\u043a\u0430 \u0441\u0435\u0439\u0432\u043e\u0432 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430."
+        LegacyRedirect = "\u0412\u0441\u044f \u043f\u0430\u043f\u043a\u0430 Saved \u0441\u0435\u0439\u0447\u0430\u0441 \u043f\u0435\u0440\u0435\u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0430. \u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0441\u0434\u0435\u043b\u0430\u0439 \u043e\u0442\u043a\u0430\u0442, \u043f\u043e\u0442\u043e\u043c \u043f\u0435\u0440\u0435\u043d\u0435\u0441\u0438 \u0442\u043e\u043b\u044c\u043a\u043e SaveProfiles."
         ConfirmMove = "\u0411\u0443\u0434\u0435\u0442 \u0441\u043e\u0437\u0434\u0430\u043d backup, \u0437\u0430\u0442\u0435\u043c \u043f\u0430\u043f\u043a\u0430 \u0441\u0435\u0439\u0432\u043e\u0432 \u0431\u0443\u0434\u0435\u0442 \u043f\u0435\u0440\u0435\u043d\u0435\u0441\u0435\u043d\u0430:`n`n{0}`n->`n{1}`n`n\u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c?"
         ConfirmMoveTitle = "\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c"
         ConfirmRestore = "\u0412\u0435\u0440\u043d\u0443\u0442\u044c \u0441\u0435\u0439\u0432\u044b \u043d\u0430 \u0441\u0442\u0430\u0440\u043e\u0435 \u043c\u0435\u0441\u0442\u043e \u0438 \u0443\u0434\u0430\u043b\u0438\u0442\u044c junction?"
@@ -555,8 +630,13 @@ function Refresh-Discovery {
 
     $savePath = Find-WindroseSavePath
     Set-TextBoxValue $script:SavePathBox $savePath
+    $savedRoot = Split-Path -Parent $savePath
     $state = Get-RedirectState -SavePath $savePath
-    if ($state -eq "normal") {
+    if ((Get-RedirectState -SavePath $savedRoot) -eq "redirected") {
+        Set-Status (T "LegacyRedirect") $gold
+        Write-Log (T "LegacyRedirect")
+    }
+    elseif ($state -eq "normal") {
         Set-Status (T "SavesFound") $green
         Write-Log ([string]::Format((T "SaveFolderFound"), $savePath))
     }
@@ -583,8 +663,13 @@ $browseButton.Add_Click({
 $checkButton.Add_Click({
     try {
         $state = Get-RedirectState -SavePath $script:SavePathBox.Text
+        $savedRoot = Split-Path -Parent $script:SavePathBox.Text
         Write-Log ([string]::Format((T "SaveState"), $state))
-        if ($state -eq "redirected") {
+        if ((Get-RedirectState -SavePath $savedRoot) -eq "redirected") {
+            Set-Status (T "LegacyRedirect") $gold
+            Write-Log (T "LegacyRedirect")
+        }
+        elseif ($state -eq "redirected") {
             Set-Status (T "CheckLinked") $gold
         }
         elseif ($state -eq "normal") {
