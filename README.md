@@ -85,6 +85,14 @@ Expected result:
 <JUNCTION> SaveProfiles [D:\...\Windrose Saves\SaveProfiles]
 ```
 
+## VirusTotal
+
+Release archive scan:
+
+```text
+https://www.virustotal.com/gui/file/22dbebe7a033b16e47b6bfdd0eb810acc96b43162ba7ed791ee45ea2e32d226d
+```
+
 ## Notes
 
 - The game must be closed before moving or restoring saves.
@@ -179,6 +187,14 @@ dir /AL "%LOCALAPPDATA%\R5\Saved"
 
 ```text
 <JUNCTION> SaveProfiles [D:\...\Windrose Saves\SaveProfiles]
+```
+
+## VirusTotal
+
+Проверка release-архива:
+
+```text
+https://www.virustotal.com/gui/file/22dbebe7a033b16e47b6bfdd0eb810acc96b43162ba7ed791ee45ea2e32d226d
 ```
 
 ## Важно
